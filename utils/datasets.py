@@ -1,6 +1,7 @@
 # YOLOv5 🚀 by Ultralytics, GPL-3.0 license
 """
 Dataloaders and dataset utils
+数据加载和数据增强
 """
 
 import glob
@@ -24,7 +25,7 @@ import torch.nn.functional as F
 import yaml
 from PIL import ExifTags, Image, ImageOps
 from torch.utils.data import DataLoader, Dataset, dataloader, distributed
-from tqdm import tqdm
+from tqdm import tqdm  # 进度条模块
 
 from utils.augmentations import Albumentations, augment_hsv, copy_paste, letterbox, mixup, random_perspective
 from utils.general import (DATASETS_DIR, LOGGER, NUM_THREADS, check_dataset, check_requirements, check_yaml, clean_str,
@@ -32,13 +33,17 @@ from utils.general import (DATASETS_DIR, LOGGER, NUM_THREADS, check_dataset, che
 from utils.torch_utils import torch_distributed_zero_first
 
 # Parameters
+#帮助文档
 HELP_URL = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
-IMG_FORMATS = 'bmp', 'dng', 'jpeg', 'jpg', 'mpo', 'png', 'tif', 'tiff', 'webp'  # include image suffixes
-VID_FORMATS = 'asf', 'avi', 'gif', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'ts', 'wmv'  # include video suffixes
-BAR_FORMAT = '{l_bar}{bar:10}{r_bar}{bar:-10b}'  # tqdm bar format
+IMG_FORMATS = 'bmp', 'dng', 'jpeg', 'jpg', 'mpo', 'png', 'tif', 'tiff', 'webp'  # 支持的图像后缀格式
+VID_FORMATS = 'asf', 'avi', 'gif', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'ts', 'wmv'  # 支持的视频后缀格式
+BAR_FORMAT = '{l_bar}{bar:10}{r_bar}{bar:-10b}'  # 进度条格式
+#local_rank是指在一台机器上(一个node上)进程的相对序号，例如机器一上有0,1,2,3,4，机器二上也有0,1,2,3,4。local_rank在node之间相互独立
+#主要与多卡训练有关，DistributedDataParallel
 LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
 
 # Get orientation exif tag
+#exif包含了很多拍摄的信息，比如方向、型号、生产商。这里为了获得orientation信息
 for orientation in ExifTags.TAGS.keys():
     if ExifTags.TAGS[orientation] == 'Orientation':
         break
@@ -51,19 +56,30 @@ def get_hash(paths):
     h.update(''.join(paths).encode())  # hash paths
     return h.hexdigest()  # return hash
 
-
+"""
+exif是专门为数码相机的照片设定的文件格式，但exif文件实际是JPEG文件的一种
+"""
 def exif_size(img):
     # Returns exif-corrected PIL size
     s = img.size  # (width, height)
     try:
+        #exif中包含了拍摄的很多信息，比如下面提取的orientation，方向，从而判断是否需要旋转
         rotation = dict(img._getexif().items())[orientation]
+        """ 
+                    ^y (90°)      
+                    |  
+                    |
+     (180°) ---------------->x  (0°)
+                    |
+                    |(270°)
+        单反有时候会竖起来拍，也就是90°或者270°，这时的图像是高瘦的，猜测网络喜欢矮胖的即w>h         
+        """
         if rotation == 6:  # rotation 270
             s = (s[1], s[0])
         elif rotation == 8:  # rotation 90
             s = (s[1], s[0])
     except Exception:
         pass
-
     return s
 
 
@@ -93,26 +109,28 @@ def exif_transpose(image):
     return image
 
 
-def create_dataloader(path,
-                      imgsz,
+def create_dataloader(path,      #图片数据加载路径
+                      imgsz,     #图片尺寸
                       batch_size,
-                      stride,
-                      single_cls=False,
-                      hyp=None,
-                      augment=False,
-                      cache=False,
-                      pad=0.0,
-                      rect=False,
-                      rank=-1,
-                      workers=8,
-                      image_weights=False,
-                      quad=False,
+                      stride,    #步长
+                      single_cls=False,     #是否单类
+                      hyp=None,       #超参，lr、rotate...
+                      augment=False,  #数据增强
+                      cache=False,    #是否缓存
+                      pad=0.0,        #填充Value
+                      rect=False,     #是否采用矩形训练
+                      rank=-1,        #该进程的进程号
+                      workers=8,      #加载数据时进程数
+                      image_weights=False,   #练时是否根据图片样本真实框分布权重来选择图片
+                      quad=False,            #取数据时, 是否使用collate_fn4代替collate_fn
                       prefix='',
-                      shuffle=False):
+                      shuffle=False):        #是否随机打乱
     #rect和shuffle不兼容，当设置两者都为TRUE，给shuffle置为flase
     if rect and shuffle:
         LOGGER.warning('WARNING: --rect is incompatible with DataLoader shuffle, setting shuffle=False')
         shuffle = False
+    # 主进程实现数据的预读取并缓存，然后其它子进程则从缓存中读取数据并进行一系列运算。
+    # 其他进程到了之后会阻塞等待主进程
     with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
         dataset = LoadImagesAndLabels(
             path,
@@ -395,7 +413,9 @@ def img2label_paths(img_paths):
     sa, sb = os.sep + 'images' + os.sep, os.sep + 'labels' + os.sep  # /images/, /labels/ substrings
     return [sb.join(x.rsplit(sa, 1)).rsplit('.', 1)[0] + '.txt' for x in img_paths]
 
-
+"""
+自定义Dataset，需要重写__init__、getitem()、collate_fn()等
+"""
 class LoadImagesAndLabels(Dataset):
     # YOLOv5 train_loader/
     #
@@ -403,7 +423,8 @@ class LoadImagesAndLabels(Dataset):
     #
     #
     # val_loader, loads images and labels for training and validation
-    #cache_version做一个版本匹配，下面有assert cache['version'] == self.cache_version
+    #cache_version做一个版本匹配，下面有assert cache['version'] == self.cache_version。
+    #如果对不上号，说明出现了变动，需要重新加载cache而不是直接读取
     cache_version = 0.6  # dataset labels *.cache version
 
     def __init__(self,
@@ -422,7 +443,7 @@ class LoadImagesAndLabels(Dataset):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
-        self.image_weights = image_weights   #image_weights 图片采样策略
+        self.image_weights = image_weights   #image_weights 图片采样策略,即频率高权重小
         self.rect = False if image_weights else rect
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
         self.mosaic_border = [-img_size // 2, -img_size // 2]
@@ -435,18 +456,24 @@ class LoadImagesAndLabels(Dataset):
             #加载图片路径list到f[]
             f = []  # image files
             for p in path if isinstance(path, list) else [path]:
+                # 使用pathlib.Path生成与操作系统无关的路径，因为不同操作系统路径的‘/’会有所不同
                 p = Path(p)  # os-agnostic
+                #p是包含数据集的文件路径
                 if p.is_dir():  # dir
+                    #递归获取p路径下所有文件
                     f += glob.glob(str(p / '**' / '*.*'), recursive=True)
                     # f = list(p.rglob('*.*'))  # pathlib
+                #p是包含数据集路径的文本，比如.txt,所以要打开读取
                 elif p.is_file():  # file
                     with open(p) as t:
                         t = t.read().strip().splitlines()
+                        #os.sep为路径里的分隔符（不同系统分隔符不一样），构建完成完整路径
                         parent = str(p.parent) + os.sep
                         f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
                         # f += [p.parent / x.lstrip(os.sep) for x in t]  # local to global path (pathlib)
                 else:
                     raise Exception(f'{prefix}{p} does not exist')
+            #筛选后缀符合要求的图片的路径
             self.im_files = sorted(x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in IMG_FORMATS)
             # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in IMG_FORMATS])  # pathlib
             assert self.im_files, f'{prefix}No images found'
@@ -455,16 +482,16 @@ class LoadImagesAndLabels(Dataset):
 
         # 加载图片的标注list
         self.label_files = img2label_paths(self.im_files)  # labels
-        # Check cache  创建一个缓存，得到的cache是一个压缩文件，是标签array和对应图像尺寸（448,448）的压缩
-        #如果有就用，没有就创建
+        # Check cache  创建一个缓存，得到的cache是一个压缩文件，是标签array和对应图像尺寸（448,448）的压缩，加快下次读取速度
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')
         try:
+            #cache读取的信息，如下面的nf、nm、ne；exists为是否存在可用cache文件
             cache, exists = np.load(cache_path, allow_pickle=True).item(), True  # load dict
+            #判断cache版本和图片和注释的哈希值是否相同，相同直接从cache读取，否则重新加载cache
             assert cache['version'] == self.cache_version  # same version
             assert cache['hash'] == get_hash(self.label_files + self.im_files)  # same hash
         except Exception:
             cache, exists = self.cache_labels(cache_path, prefix), False  # cache
-
         # Display cache
         nf, nm, ne, nc, n = cache.pop('results')  # found, missing, empty, corrupt, total
         if exists and LOCAL_RANK in (-1, 0):
@@ -544,17 +571,39 @@ class LoadImagesAndLabels(Dataset):
                     gb += self.ims[i].nbytes
                 pbar.desc = f'{prefix}Caching images ({gb / 1E9:.1f}GB {cache_images})'
             pbar.close()
-
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
+        """
+        将label信息加载到cache
+        path:cache的路径
+        prefix:打印信息
+        """
         # Cache dataset labels, check images and read shapes
-        x = {}  # dict
+        x = {}  # 最终的cache其实是一个字典
+        """
+        nm:没找到的label总数量
+        nf:找到的label总数量
+        ne:空的label总数量
+        nc:错误标签总数量
+        msgs:log info
+        """
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
         desc = f"{prefix}Scanning '{path.parent / path.stem}' images and labels..."
+        #Pool,进程池
         with Pool(NUM_THREADS) as pool:
+            """
+            创建一个进度条，然后检查图像和标签数据，显示进度
+            pool.imap(func, iterable, chunksize=0),进程池中的该方法会将 iterable 参数传入的可迭代对象分成 chunksize 份传递给不同的进程来处理
+            verify_image_label为检查图像label的方法
+            """
             pbar = tqdm(pool.imap(verify_image_label, zip(self.im_files, self.label_files, repeat(prefix))),
                         desc=desc,
                         total=len(self.im_files),
                         bar_format=BAR_FORMAT)
+            """
+            这些参数是verify_image_label中返回的，结合上下文，
+            im_file:图片的路径
+            lb：label路径
+            """
             for im_file, lb, shape, segments, nm_f, nf_f, ne_f, nc_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
@@ -934,15 +983,24 @@ def autosplit(path=DATASETS_DIR / 'coco128/images', weights=(0.9, 0.1, 0.0), ann
             with open(path.parent / txt[i], 'a') as f:
                 f.write('./' + img.relative_to(path.parent).as_posix() + '\n')  # add image to txt file
 
-
+"""
+这个函数用于检查图片和label文件是否完好
+图片文件: 检查内容、格式、大小、完整性
+label文件: 检查每个gt必须是矩形(每行都得是5个数 class+xywh) + 标签是否全部>=0 + 标签坐标xywh是否归一化 + 标签中是否有重复的坐标
+"""
 def verify_image_label(args):
     # Verify one image-label pair
+    """
+    im_file: 图片的相对路径
+    lb_file: label的相对路径
+    prefix: 日志信息
+    """
     im_file, lb_file, prefix = args
     nm, nf, ne, nc, msg, segments = 0, 0, 0, 0, '', []  # number (missing, found, empty, corrupt), message, segments
     try:
         # verify images
         im = Image.open(im_file)
-        im.verify()  # PIL verify
+        im.verify()  # PIL verify，验证图片是否能正常读取、打开，然后校验图片内容
         shape = exif_size(im)  # image size
         assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
         assert im.format.lower() in IMG_FORMATS, f'invalid image format {im.format}'
